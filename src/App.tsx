@@ -40,7 +40,10 @@ import {
   Check, 
   ExternalLink,
   Info,
-  Calendar
+  Calendar,
+  LogIn,
+  LogOut,
+  Cloud
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -55,6 +58,29 @@ import {
   Legend 
 } from 'recharts';
 import confetti from 'canvas-confetti';
+import AuthPage from './components/AuthPage';
+import { 
+  auth, 
+  db, 
+  googleProvider, 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updateProfile,
+  handleFirestoreError, 
+  OperationType,
+  type User 
+} from './firebase';
+import { 
+  collection, 
+  doc, 
+  getDoc,
+  setDoc, 
+  deleteDoc, 
+  onSnapshot 
+} from 'firebase/firestore';
 
 // Format Currency Utility (IDR)
 const formatRp = (number: number | null | undefined): string => {
@@ -185,24 +211,198 @@ export default function App() {
   const [showShareDropdown, setShowShareDropdown] = useState(false);
   const [copiedNotification, setCopiedNotification] = useState<string | null>(null);
 
-  // --- PERSISTENT PIPELINE STATE ---
-  const [pipelines, setPipelines] = useState<PipelineItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('findashboard_pipelines_v1');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore
-    }
-    return INITIAL_PIPELINES;
-  });
+  // --- PERSISTENT PIPELINE STATE (Scoped per User or Guest) ---
+  const [pipelines, setPipelines] = useState<PipelineItem[]>([]);
 
+  // --- FIREBASE AUTH & USER PROFILE STATE ---
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [userProfileData, setUserProfileData] = useState<{ unitKerja?: string } | null>(null);
+  const [guestMode, setGuestMode] = useState(false);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isSyncingWithFirestore, setIsSyncingWithFirestore] = useState(false);
+
+  // Monitor Auth state changes
   useEffect(() => {
-    try {
-      localStorage.setItem('findashboard_pipelines_v1', JSON.stringify(pipelines));
-    } catch {
-      // ignore
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      setIsAuthLoading(false);
+      if (user) {
+        // Pre-load locally cached data for this specific user
+        try {
+          const userCache = localStorage.getItem(`findashboard_pipelines_${user.uid}`);
+          if (userCache) {
+            setPipelines(JSON.parse(userCache));
+          } else {
+            setPipelines([]);
+          }
+        } catch {
+          setPipelines([]);
+        }
+
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          const snap = await getDoc(userRef);
+          if (snap.exists()) {
+            const data = snap.data();
+            setUserProfileData({ unitKerja: data.unitKerja || 'Unit Air Kumbang 2' });
+            if (data.unitKerja) {
+              setMemoData((prev) => ({
+                ...prev,
+                unit: data.unitKerja || prev.unit,
+                namaSgp: user.displayName || prev.namaSgp
+              }));
+            }
+          } else {
+            await setDoc(userRef, {
+              uid: user.uid,
+              email: user.email || '',
+              displayName: user.displayName || '',
+              photoURL: user.photoURL || '',
+              unitKerja: 'Unit Air Kumbang 2',
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
+            setUserProfileData({ unitKerja: 'Unit Air Kumbang 2' });
+          }
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+        }
+      } else {
+        setUserProfileData(null);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Save to local cache per user
+  useEffect(() => {
+    if (currentUser) {
+      try {
+        localStorage.setItem(`findashboard_pipelines_${currentUser.uid}`, JSON.stringify(pipelines));
+      } catch {
+        // ignore
+      }
+    } else if (guestMode) {
+      try {
+        localStorage.setItem('findashboard_pipelines_guest', JSON.stringify(pipelines));
+      } catch {
+        // ignore
+      }
     }
-  }, [pipelines]);
+  }, [pipelines, currentUser, guestMode]);
+
+  // Real-time Firestore synchronizer for logged-in user (STRICT ISOLATION)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    setIsSyncingWithFirestore(true);
+    const colRef = collection(db, 'users', currentUser.uid, 'pipelines');
+
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      if (snapshot.empty) {
+        // New account with zero records starts clean with empty list
+        setPipelines([]);
+      } else {
+        const firestoreList: PipelineItem[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          firestoreList.push({
+            id: Number(docSnap.id) || Number(data.id) || Date.now(),
+            nama: data.nama || '',
+            alamat: data.alamat || '',
+            usaha: data.usaha || '',
+            limit: Number(data.limit) || 0,
+            tenor: Number(data.tenor) || 12,
+            status: data.status || 'Menunggu BIK / SLIK',
+            produk: data.produk || 'KUM',
+            bulan: data.bulan || getTodayDateString(),
+            telepon: data.telepon || ''
+          });
+        });
+        setPipelines(firestoreList);
+      }
+      setIsSyncingWithFirestore(false);
+    }, (error) => {
+      setIsSyncingWithFirestore(false);
+      handleFirestoreError(error, OperationType.LIST, `users/${currentUser.uid}/pipelines`);
+    });
+
+    return () => unsubscribe();
+  }, [currentUser]);
+
+  const handleSignInGoogle = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      showToast('Berhasil masuk dengan akun Google!');
+    } catch (err: any) {
+      console.error('Sign in error:', err);
+      showToast('Gagal masuk Google: ' + (err.message || 'Coba lagi'));
+    }
+  };
+
+  const handleSignInEmail = async (email: string, pass: string) => {
+    await signInWithEmailAndPassword(auth, email, pass);
+    showToast('Berhasil masuk ke akun Anda!');
+  };
+
+  const handleSignUpEmail = async (name: string, unit: string, email: string, pass: string) => {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    if (cred.user) {
+      if (name.trim()) {
+        try {
+          await updateProfile(cred.user, { displayName: name.trim() });
+        } catch (e) {
+          console.warn('Update profile error:', e);
+        }
+      }
+      try {
+        const userRef = doc(db, 'users', cred.user.uid);
+        await setDoc(userRef, {
+          uid: cred.user.uid,
+          email: email,
+          displayName: name.trim(),
+          unitKerja: unit.trim() || 'Unit Air Kumbang 2',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        setUserProfileData({ unitKerja: unit.trim() || 'Unit Air Kumbang 2' });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${cred.user.uid}`);
+      }
+      showToast('Pendaftaran akun berhasil! Data Anda tersimpan privat.');
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setGuestMode(false);
+      setPipelines([]);
+      showToast('Berhasil keluar dari akun.');
+    } catch (err: any) {
+      console.error('Sign out error:', err);
+    }
+  };
+
+  const handleLoadSamplePipelines = async () => {
+    if (currentUser) {
+      try {
+        for (const item of INITIAL_PIPELINES) {
+          await setDoc(doc(db, 'users', currentUser.uid, 'pipelines', String(item.id)), {
+            ...item,
+            userId: currentUser.uid,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+        }
+        showToast('Data contoh berhasil dimuat ke akun Anda!');
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${currentUser.uid}/pipelines`);
+      }
+    } else {
+      setPipelines(INITIAL_PIPELINES);
+      showToast('Data contoh berhasil dimuat.');
+    }
+  };
 
   // --- STATE TARGET MPS & PODIUM ---
   const [selectedGrade, setSelectedGrade] = useState<'Podium A' | 'Podium B'>('Podium A');
@@ -538,12 +738,30 @@ export default function App() {
   const handleDelete = (id: number) => {
     if (window.confirm('Hapus debitur ini dari pipeline?')) {
       setPipelines((prev) => prev.filter((p) => p.id !== id));
+      if (currentUser) {
+        deleteDoc(doc(db, 'users', currentUser.uid, 'pipelines', String(id))).catch((err) => {
+          handleFirestoreError(err, OperationType.DELETE, `users/${currentUser.uid}/pipelines/${id}`);
+        });
+      }
       showToast('Data debitur berhasil dihapus.');
     }
   };
 
   const handleQuickStatusChange = (id: number, newStatus: string) => {
     setPipelines((prev) => prev.map((p) => p.id === id ? { ...p, status: newStatus } : p));
+    if (currentUser) {
+      const targetItem = pipelines.find((p) => p.id === id);
+      if (targetItem) {
+        setDoc(doc(db, 'users', currentUser.uid, 'pipelines', String(id)), {
+          ...targetItem,
+          status: newStatus,
+          userId: currentUser.uid,
+          updatedAt: new Date().toISOString()
+        }, { merge: true }).catch((err) => {
+          handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.uid}/pipelines/${id}`);
+        });
+      }
+    }
     showToast(`Status diperbarui ke: ${newStatus}`);
   };
 
@@ -554,11 +772,22 @@ export default function App() {
     const limitVal = parseFormattedNumber(formData.limit);
 
     if (currentEditId) {
-      setPipelines((prev) => prev.map((p) => p.id === currentEditId ? {
-        ...p,
+      const updatedItem: PipelineItem = {
         ...formData,
-        limit: limitVal
-      } : p));
+        id: currentEditId,
+        limit: limitVal,
+        tenor: Number(formData.tenor)
+      };
+      setPipelines((prev) => prev.map((p) => p.id === currentEditId ? updatedItem : p));
+      if (currentUser) {
+        setDoc(doc(db, 'users', currentUser.uid, 'pipelines', String(currentEditId)), {
+          ...updatedItem,
+          userId: currentUser.uid,
+          updatedAt: new Date().toISOString()
+        }).catch((err) => {
+          handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.uid}/pipelines/${currentEditId}`);
+        });
+      }
       showToast('Perubahan data berhasil disimpan!');
     } else {
       const newItem: PipelineItem = {
@@ -574,6 +803,16 @@ export default function App() {
         telepon: formData.telepon
       };
       setPipelines((prev) => [newItem, ...prev]);
+      if (currentUser) {
+        setDoc(doc(db, 'users', currentUser.uid, 'pipelines', String(newItem.id)), {
+          ...newItem,
+          userId: currentUser.uid,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }).catch((err) => {
+          handleFirestoreError(err, OperationType.CREATE, `users/${currentUser.uid}/pipelines/${newItem.id}`);
+        });
+      }
       showToast('Aplikasi debitur baru berhasil ditambahkan!');
     }
     handleCloseModal();
@@ -824,6 +1063,36 @@ Demikian, terima kasih`;
     showToast('Contoh data (Jiono) berhasil dimuat!');
   };
 
+  // --- AUTH GATING: SHOW LOGIN & REGISTER BEFORE DASHBOARD ---
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex flex-col items-center justify-center text-white p-4">
+        <div className="mb-4 shadow-2xl flex items-center justify-center">
+          <img 
+            src="/assets/aistudio/Bank_Mandiri_Gass_APP_Credit_Monitor_6494e849.png" 
+            alt="Logo Mandiri Gass APP" 
+            className="w-16 h-16 rounded-2xl shadow-lg object-contain bg-white p-1 animate-pulse"
+          />
+        </div>
+        <div className="w-8 h-8 border-3 border-blue-400 border-t-transparent rounded-full animate-spin mb-3"></div>
+        <h2 className="text-base font-bold text-white tracking-wide">Dashboard Gasss</h2>
+        <p className="text-xs text-slate-400 mt-1 font-medium">Memeriksa Sesi Akun &amp; Database...</p>
+      </div>
+    );
+  }
+
+  if (!currentUser && !guestMode) {
+    return (
+      <AuthPage 
+        onSignInGoogle={handleSignInGoogle}
+        onSignInEmail={handleSignInEmail}
+        onSignUpEmail={handleSignUpEmail}
+        onContinueAsGuest={() => setGuestMode(true)}
+        isLoading={isAuthLoading}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans pb-16 md:pb-0">
       
@@ -842,9 +1111,11 @@ Demikian, terima kasih`;
             
             {/* Logo & Subtitle */}
             <div className="flex items-center space-x-3">
-              <div className="bg-blue-600 p-2.5 rounded-xl text-white shadow-sm flex-shrink-0">
-                <Building2 className="w-5 h-5" />
-              </div>
+              <img 
+                src="/assets/aistudio/Bank_Mandiri_Gass_APP_Credit_Monitor_6494e849.png" 
+                alt="Logo Mandiri Gass APP" 
+                className="w-10 h-10 rounded-xl shadow-xs object-contain bg-white p-0.5 border border-slate-200 flex-shrink-0"
+              />
               <div>
                 <div className="flex items-center space-x-2">
                   <h1 className="font-extrabold text-base sm:text-lg leading-tight tracking-tight text-slate-900">
@@ -855,7 +1126,7 @@ Demikian, terima kasih`;
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-500 hidden sm:block">
-                  Monitoring MPS 1,2 M, Podium Target, Brosur Suku Bunga &amp; DBR Debitur
+                  Sistem Monitoring Pipeline, MPS, Kalkulator kredit
                 </p>
               </div>
             </div>
@@ -917,15 +1188,62 @@ Demikian, terima kasih`;
               </button>
             </nav>
 
-            {/* Quick Actions & Mobile Menu Button */}
+            {/* Quick Actions & Firebase Auth Session */}
             <div className="flex items-center space-x-2">
+              {currentUser ? (
+                <div className="flex items-center space-x-2 bg-slate-50 border border-slate-200 py-1 px-2.5 rounded-xl shadow-2xs">
+                  {currentUser.photoURL ? (
+                    <img 
+                      src={currentUser.photoURL} 
+                      alt={currentUser.displayName || 'User'} 
+                      className="w-6 h-6 rounded-full border border-blue-400 object-cover"
+                    />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-bold text-[10px] flex items-center justify-center">
+                      {(currentUser.displayName || currentUser.email || 'U')[0].toUpperCase()}
+                    </div>
+                  )}
+                  <div className="hidden sm:block text-left">
+                    <p className="text-[11px] font-bold text-slate-900 leading-tight truncate max-w-[120px]">
+                      {currentUser.displayName || currentUser.email?.split('@')[0]}
+                    </p>
+                    <span className="text-[9px] text-emerald-600 font-semibold flex items-center space-x-1">
+                      <Cloud className="w-2.5 h-2.5" />
+                      <span>{isSyncingWithFirestore ? 'Sinkron...' : (userProfileData?.unitKerja ? userProfileData.unitKerja.slice(0, 15) : 'Cloud Aktif')}</span>
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleSignOut}
+                    title="Keluar dari akun (Logout)"
+                    className="flex items-center space-x-1 px-2 py-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-lg transition-colors ml-1 text-xs font-bold"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Keluar</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center space-x-1.5">
+                  <span className="hidden sm:inline-flex bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                    Mode Tamu
+                  </span>
+                  <button
+                    onClick={() => setGuestMode(false)}
+                    className="inline-flex items-center space-x-1 bg-blue-600 hover:bg-blue-700 text-white py-1.5 px-3 rounded-xl text-xs font-bold shadow-2xs transition-all active:scale-95"
+                    title="Masuk atau Daftar Akun"
+                  >
+                    <LogIn className="w-3.5 h-3.5" />
+                    <span>Masuk / Daftar</span>
+                  </button>
+                </div>
+              )}
+
               <button
-                onClick={handleResetData}
-                title="Reset Data ke Default"
+                onClick={handleLoadSamplePipelines}
+                title="Muat Data Contoh Pipeline"
                 className="hidden sm:flex items-center space-x-1 px-2.5 py-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reset</span>
+                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                <span>Contoh Data</span>
               </button>
 
               <div className="lg:hidden">
@@ -999,14 +1317,52 @@ Demikian, terima kasih`;
               </div>
             </button>
 
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-              <span>Unit Air Kumbang 2</span>
-              <button
-                onClick={handleResetData}
-                className="text-blue-600 font-semibold hover:underline"
-              >
-                Reset Demo Data
-              </button>
+            {/* User status in mobile */}
+            <div className="pt-2 border-t border-slate-100 space-y-2">
+              {currentUser ? (
+                <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200">
+                  <div className="flex items-center space-x-2">
+                    {currentUser.photoURL ? (
+                      <img src={currentUser.photoURL} alt="" className="w-8 h-8 rounded-full border border-blue-400 object-cover" />
+                    ) : (
+                      <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center">
+                        {(currentUser.displayName || currentUser.email || 'U')[0].toUpperCase()}
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-xs font-bold text-slate-900 truncate max-w-[170px]">{currentUser.displayName || currentUser.email}</p>
+                      <p className="text-[10px] text-emerald-600 font-semibold flex items-center space-x-1">
+                        <Cloud className="w-3 h-3" />
+                        <span>{userProfileData?.unitKerja || 'Cloud Firestore Aktif'}</span>
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => { handleSignOut(); setMobileMenuOpen(false); }}
+                    className="px-3 py-1.5 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg text-xs font-bold"
+                  >
+                    Keluar
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => { setGuestMode(false); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center justify-center space-x-2 py-2.5 bg-blue-600 text-white rounded-xl font-bold text-xs shadow-xs"
+                >
+                  <LogIn className="w-4 h-4" />
+                  <span>Masuk / Daftar Akun</span>
+                </button>
+              )}
+
+              <div className="flex items-center justify-between text-xs text-slate-500 pt-1">
+                <span>{userProfileData?.unitKerja || 'Unit Air Kumbang 2'}</span>
+                <button
+                  onClick={() => { handleLoadSamplePipelines(); setMobileMenuOpen(false); }}
+                  className="text-blue-600 font-semibold hover:underline"
+                >
+                  Muat Data Contoh
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1587,8 +1943,40 @@ Demikian, terima kasih`;
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={9} className="py-8 text-center text-slate-400 font-medium">
-                          Tidak ada data pipeline yang sesuai pencarian.
+                        <td colSpan={9} className="py-12 text-center text-slate-500">
+                          {pipelines.length === 0 ? (
+                            <div className="max-w-md mx-auto space-y-3">
+                              <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto border border-blue-200">
+                                <Users className="w-6 h-6" />
+                              </div>
+                              <h4 className="font-bold text-slate-800 text-sm">
+                                Belum Ada Data Pipeline di Akun Anda
+                              </h4>
+                              <p className="text-xs text-slate-500 leading-relaxed">
+                                Setiap akun menyimpan datanya sendiri secara privat dan aman di Firebase Cloud. Mulai catat aplikasi calon debitur Anda sekarang.
+                              </p>
+                              <div className="flex items-center justify-center space-x-2 pt-2">
+                                <button
+                                  type="button"
+                                  onClick={handleOpenModal}
+                                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center space-x-1.5"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                  <span>+ Tambah Prospek Pertama</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleLoadSamplePipelines}
+                                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center space-x-1.5"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                                  <span>Muat Data Contoh</span>
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-slate-400 font-medium">Tidak ada data pipeline yang sesuai filter pencarian.</p>
+                          )}
                         </td>
                       </tr>
                     )}
@@ -1677,8 +2065,40 @@ Demikian, terima kasih`;
                     </div>
                   ))
                 ) : (
-                  <div className="p-6 text-center text-slate-400 text-xs">
-                    Tidak ada nasabah yang sesuai kriteria pencarian.
+                  <div className="p-6 text-center text-slate-500">
+                    {pipelines.length === 0 ? (
+                      <div className="space-y-3">
+                        <div className="w-10 h-10 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto border border-blue-200">
+                          <Users className="w-5 h-5" />
+                        </div>
+                        <h4 className="font-bold text-slate-800 text-xs">
+                          Belum Ada Data Pipeline di Akun Anda
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          Setiap akun menyimpan datanya sendiri di cloud secara privat.
+                        </p>
+                        <div className="flex flex-col space-y-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={handleOpenModal}
+                            className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center justify-center space-x-1.5"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>+ Tambah Prospek Pertama</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleLoadSamplePipelines}
+                            className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                            <span>Muat Data Contoh Demo</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 text-xs">Tidak ada nasabah yang sesuai kriteria pencarian.</span>
+                    )}
                   </div>
                 )}
               </div>
@@ -2604,9 +3024,11 @@ Demikian, terima kasih`;
               {/* Header Brosur */}
               <div className="flex items-center justify-between border-b-2 border-slate-800 pb-4">
                 <div className="flex items-center space-x-3">
-                  <div className="bg-blue-600 text-white p-3 rounded-2xl shadow-xs">
-                    <Building2 className="w-6 h-6" />
-                  </div>
+                  <img 
+                    src="/assets/aistudio/Bank_Mandiri_Gass_APP_Credit_Monitor_6494e849.png" 
+                    alt="Logo Mandiri Gass APP" 
+                    className="w-12 h-12 rounded-xl object-contain bg-white p-0.5 border border-slate-300 shadow-xs flex-shrink-0"
+                  />
                   <div>
                     <h2 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight">
                       BROSUR SIMULASI ANGSURAN PINJAMAN

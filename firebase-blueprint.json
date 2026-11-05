@@ -1,0 +1,69 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Pipeline": {
+      "title": "Pipeline",
+      "description": "Microcredit applicant prospect pipeline",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nama": { "type": "string", "maxLength": 100 },
+        "alamat": { "type": "string", "maxLength": 255 },
+        "usaha": { "type": "string", "maxLength": 150 },
+        "limit": { "type": "number" },
+        "tenor": { "type": "number" },
+        "status": { "type": "string", "maxLength": 60 },
+        "produk": { "type": "string", "enum": ["KUM", "KUR", "Kawan Lawa"] },
+        "bulan": { "type": "string", "maxLength": 30 },
+        "telepon": { "type": "string", "maxLength": 30 },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["nama", "limit", "tenor", "produk", "userId"]
+    },
+    "Memo": {
+      "title": "Memo",
+      "description": "Debtor committee approval credit memo",
+      "type": "object",
+      "properties": {
+        "namaNsbh": { "type": "string", "maxLength": 100 },
+        "produk": { "type": "string" },
+        "limit": { "type": "number" },
+        "tenor": { "type": "number" },
+        "angsuranPerBulan": { "type": "number" },
+        "pendapatanKotor": { "type": "number" },
+        "biayaUsaha": { "type": "number" },
+        "userId": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["namaNsbh", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/users/{userId}/pipelines/{pipelineId}": {
+      "schema": "Pipeline",
+      "description": "User microcredit applicant pipelines"
+    },
+    "/users/{userId}/memos/{memoId}": {
+      "schema": "Memo",
+      "description": "Debtor approval memos"
+    }
+  }
+}
