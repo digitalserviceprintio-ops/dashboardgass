@@ -1,0 +1,6 @@
+{
+  "name": "FinDashboard PRD - Brosur Suku Bunga & Pipeline Kredit",
+  "description": "Aplikasi manajemen pipeline kredit mikro (KUM, KUR, Kawan Lawa), monitoring target Wajib MPS & Podium, kalkulator brosur suku bunga efektif ke flat, serta generator memo komite dengan kalkulasi DBR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
